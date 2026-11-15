@@ -1,0 +1,241 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum UserRole {
+  ADMIN
+  OPERATOR
+  VIEWER
+}
+
+enum DeviceLifecycle {
+  REGISTERED
+  PROVISIONED
+  ACTIVE
+  FAULT
+  MAINTENANCE
+  REVOKED
+  DECOMMISSIONED
+}
+
+enum CommandStatus {
+  PENDING
+  SENT
+  ACKNOWLEDGED
+  SUCCEEDED
+  REJECTED
+  TIMED_OUT
+  CANCELLED
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+enum AlertStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+model User {
+  id           String            @id @default(uuid())
+  email        String            @unique
+  passwordHash String            @map("password_hash")
+  role         UserRole          @default(VIEWER)
+  active       Boolean           @default(true)
+  createdAt    DateTime          @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt    DateTime          @updatedAt @db.Timestamptz(6) @map("updated_at")
+  sessions     UserSession[]
+  assignments  DeviceAssignment[]
+  auditEvents  AuditEvent[]
+  commands     DeviceCommand[]
+  acknowledgedAlerts Alert[]
+
+  @@map("users")
+}
+
+model UserSession {
+  id        String    @id @default(uuid())
+  tokenHash String    @unique @map("token_hash")
+  userId    String    @map("user_id")
+  expiresAt DateTime  @db.Timestamptz(6) @map("expires_at")
+  revokedAt DateTime? @db.Timestamptz(6) @map("revoked_at")
+  createdAt DateTime  @default(now()) @db.Timestamptz(6) @map("created_at")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt], map: "idx_user_sessions_user_expiry")
+  @@map("user_sessions")
+}
+
+model SensorData {
+  id               BigInt     @id @default(autoincrement())
+  /// Temperature reading from DHT11 sensor in Celsius
+  temperature      Decimal    @db.Decimal(5, 2)
+  /// Humidity reading from DHT11 sensor in percentage
+  humidity         Decimal    @db.Decimal(5, 2)
+  /// Soil moisture reading in percentage (0-100%)
+  soilMoisture     Int        @map("soil_moisture")
+  /// Soil temperature reading from DS18B20 sensor in Celsius
+  soilTemperature  Decimal?   @db.Decimal(5, 2) @map("soil_temperature")
+  /// Rain detection status from MH-RD sensor
+  rainDetected     Boolean    @map("rain_detected")
+  /// Water level classification: "Low", "Medium", or "High"
+  waterLevel       String     @map("water_level")
+  createdAt        DateTime?  @default(now()) @db.Timestamptz(6) @map("created_at")
+  schemaVersion    Int?       @map("schema_version")
+  messageId        String?    @map("message_id")
+  sequence         Int?
+  measuredAt       DateTime?  @db.Timestamptz(6) @map("measured_at")
+  receivedAt       DateTime?  @default(now()) @db.Timestamptz(6) @map("received_at")
+  sensorValidity   Json?      @map("sensor_validity")
+  deviceId         String?    @map("device_id")
+  sourceMode       String?    @map("source_mode")
+  relayLogs        RelayLog[]
+
+  @@unique([deviceId, messageId], map: "sensor_data_device_message_id_key")
+  @@index([createdAt(sort: Desc)], map: "idx_sensor_data_created_at")
+  @@index([deviceId, sourceMode, createdAt(sort: Desc)], map: "idx_sensor_data_device_source_created")
+  @@index([deviceId, sequence], map: "idx_sensor_data_device_sequence")
+  @@index([soilMoisture], map: "idx_sensor_data_soil_moisture")
+  @@index([soilTemperature], map: "idx_sensor_data_soil_temperature")
+  @@map("sensor-data")
+}
+
+model Device {
+  deviceId        String          @id @map("device_id")
+  sourceMode      String          @map("source_mode")
+  lifecycle       DeviceLifecycle @default(REGISTERED)
+  deviceType      String?         @map("device_type")
+  zone            String?
+  firmwareVersion String?         @map("firmware_version")
+  online          Boolean         @default(false)
+  relayState      String?         @map("relay_state")
+  lastError       String?         @map("last_error")
+  lastSeen        DateTime?       @db.Timestamptz(6) @map("last_seen")
+  createdAt       DateTime        @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt       DateTime        @updatedAt @db.Timestamptz(6) @map("updated_at")
+  assignments DeviceAssignment[]
+  commands    DeviceCommand[]
+  alerts      Alert[]
+  irrigationRule IrrigationRule?
+
+  @@index([sourceMode, online], map: "idx_devices_source_online")
+  @@map("devices")
+}
+
+model AuditEvent {
+  id          BigInt   @id @default(autoincrement())
+  actorUserId String?  @map("actor_user_id")
+  action      String
+  targetType  String   @map("target_type")
+  targetId    String   @map("target_id")
+  reason      String?
+  outcome     String
+  details     Json?
+  createdAt   DateTime @default(now()) @db.Timestamptz(6) @map("created_at")
+  actor       User?    @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([targetType, targetId, createdAt(sort: Desc)], map: "idx_audit_target_created")
+  @@index([actorUserId, createdAt(sort: Desc)], map: "idx_audit_actor_created")
+  @@map("audit_events")
+}
+
+model DeviceAssignment {
+  userId     String   @map("user_id")
+  deviceId   String   @map("device_id")
+  assignedAt DateTime @default(now()) @db.Timestamptz(6) @map("assigned_at")
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device     Device   @relation(fields: [deviceId], references: [deviceId], onDelete: Cascade)
+
+  @@id([userId, deviceId])
+  @@index([deviceId], map: "idx_device_assignments_device")
+  @@map("device_assignments")
+}
+
+model DeviceCommand {
+  id                 String        @id @default(uuid())
+  deviceId           String        @map("device_id")
+  requestedByUserId  String        @map("requested_by_user_id")
+  idempotencyKey     String        @map("idempotency_key")
+  desiredState       Boolean       @map("desired_state")
+  status             CommandStatus @default(PENDING)
+  expiresAt          DateTime      @db.Timestamptz(6) @map("expires_at")
+  issuedAt           DateTime      @default(now()) @db.Timestamptz(6) @map("issued_at")
+  sentAt             DateTime?     @db.Timestamptz(6) @map("sent_at")
+  acknowledgedAt     DateTime?     @db.Timestamptz(6) @map("acknowledged_at")
+  actualState        Boolean?      @map("actual_state")
+  resultReason       String?       @map("result_reason")
+  device             Device        @relation(fields: [deviceId], references: [deviceId], onDelete: Cascade)
+  requestedBy        User          @relation(fields: [requestedByUserId], references: [id], onDelete: Restrict)
+  relayLogs          RelayLog[]
+
+  @@unique([requestedByUserId, idempotencyKey], map: "device_commands_user_idempotency_key")
+  @@index([deviceId, issuedAt(sort: Desc)], map: "idx_device_commands_device_issued")
+  @@index([status, expiresAt], map: "idx_device_commands_status_expiry")
+  @@map("device_commands")
+}
+
+model Alert {
+  id                    String        @id @default(uuid())
+  deviceId              String        @map("device_id")
+  ruleCode              String        @map("rule_code")
+  severity              AlertSeverity
+  status                AlertStatus   @default(OPEN)
+  message               String
+  firstSeen             DateTime      @default(now()) @db.Timestamptz(6) @map("first_seen")
+  lastSeen              DateTime      @default(now()) @db.Timestamptz(6) @map("last_seen")
+  occurrenceCount       Int           @default(1) @map("occurrence_count")
+  acknowledgedByUserId String?       @map("acknowledged_by_user_id")
+  acknowledgedAt       DateTime?     @db.Timestamptz(6) @map("acknowledged_at")
+  acknowledgementNote String?       @map("acknowledgement_note")
+  resolvedAt           DateTime?     @db.Timestamptz(6) @map("resolved_at")
+  device               Device        @relation(fields: [deviceId], references: [deviceId], onDelete: Cascade)
+  acknowledgedBy       User?         @relation(fields: [acknowledgedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([deviceId, status, lastSeen(sort: Desc)], map: "idx_alerts_device_status_seen")
+  @@map("alerts")
+}
+
+model IrrigationRule {
+  deviceId                 String   @id @map("device_id")
+  dryStartMoisturePercent  Int      @default(10) @map("dry_start_moisture_percent")
+  wetStopMoisturePercent   Int      @default(35) @map("wet_stop_moisture_percent")
+  confirmationSamples      Int      @default(3) @map("confirmation_samples")
+  restMinutes              Int      @default(5) @map("rest_minutes")
+  version                  Int      @default(1)
+  appliedVersion           Int?     @map("applied_version")
+  appliedAt                DateTime? @db.Timestamptz(6) @map("applied_at")
+  updatedAt                DateTime @updatedAt @db.Timestamptz(6) @map("updated_at")
+  device                   Device   @relation(fields: [deviceId], references: [deviceId], onDelete: Cascade)
+
+  @@map("irrigation_rules")
+}
+
+model RelayLog {
+  id               BigInt     @id @default(autoincrement())
+  /// Relay status: true = ON (pump active), false = OFF (pump inactive)
+  relayStatus      Boolean    @map("relay_status")
+  /// Reason for relay state change
+  triggerReason    String     @map("trigger_reason")
+  /// Foreign key to sensor data reading
+  sensorReadingId  BigInt     @map("sensor_reading_id")
+  commandId        String?    @map("command_id")
+  createdAt        DateTime?  @default(now()) @db.Timestamptz(6) @map("created_at")
+  sensorData       SensorData @relation(fields: [sensorReadingId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_sensor_reading")
+  command          DeviceCommand? @relation(fields: [commandId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt(sort: Desc)], map: "idx_relay_log_created_at")
+  @@index([relayStatus], map: "idx_relay_log_status")
+  @@index([sensorReadingId], map: "idx_relay_log_sensor_reading")
+  @@index([commandId], map: "idx_relay_log_command")
+  @@map("relay-log")
+}
